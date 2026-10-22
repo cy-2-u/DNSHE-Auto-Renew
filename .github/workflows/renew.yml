@@ -1,12 +1,10 @@
 name: DNSHE Domain Auto Renew
 
 on:
-  schedule:
-    # 23 0 1 * * = 每月 1 日 UTC 00:23，即北京时间 08:23
-    # 刻意错开整点，降低 GitHub schedule 在高峰被延迟或丢弃的概率。
-    # 新仓库 / 不活跃仓库的 schedule 可能根本不触发，请同时用
-    # cron-job.org 调 workflow_dispatch（见 README）。
-    - cron: '23 0 1 * *'
+  # 仓库自带定时已关闭，改由 cron-job.org 每月调用 workflow_dispatch。
+  # 需要恢复时取消下面注释：23 0 1 * * = 每月 1 日 UTC 00:23（北京时间 08:23）
+  # schedule:
+  #   - cron: '23 0 1 * *'
   workflow_dispatch:
 
 concurrency:

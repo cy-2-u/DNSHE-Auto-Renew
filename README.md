@@ -10,7 +10,7 @@
 
 - **即时通知**：默认推荐 MeoW，也可并用 PushPlus / Telegram Bot；结果逐行显示。
 
-- **外部触发**：支持 cron-job.org 调用 `workflow_dispatch`，不依赖 GitHub 自带定时是否生效。
+- **外部触发**：仓库自带 schedule 已关闭，由 cron-job.org 每月调用 `workflow_dispatch`。
 
 - **安全合规**：采用 GitHub Secrets 管理密钥，不在代码中硬编码敏感信息。
 
@@ -22,7 +22,7 @@
 
 - **MeoW 推送**：新增 MeoW 作为推荐通知通道，配置 `MEOW_NICKNAME` 即可；PushPlus / Telegram 仍可并存。
 - **推送级别**：`PUSH_LEVEL=fail_only` 时仅在有失败项时推送，默认 `all`。
-- **外部触发**：工作流保留 `workflow_dispatch`，可用 cron-job.org 每月调用一次，避免新仓库 schedule 不触发。
+- **外部触发**：已关闭仓库自带 schedule，仅保留 `workflow_dispatch`，由 cron-job.org 每月调用一次。
 
 （2026-10-21）
 
@@ -136,11 +136,11 @@
 3. 在左侧选择 **"DNSHE Domain Auto Renew"** 工作流，点击 **Enable workflow**（若已启用则跳过）。
 4. 点击 **Run workflow** 手动触发一次，验证配置是否正确。
 
-### 第五步（推荐）：用 cron-job.org 外部触发
+### 第五步：用 cron-job.org 外部触发
 
-GitHub Actions 自带的 `schedule` 对新仓库、不活跃仓库经常不触发：手动 Run 正常，到点却没有运行记录。续期每月只跑一次，漏跑就是漏续期。
+仓库自带的 `schedule` 已关闭。续期只由 cron-job.org 每月调用一次 `workflow_dispatch`。
 
-推荐用免费的 [cron-job.org](https://cron-job.org) 每月调用一次 `workflow_dispatch`：
+用免费的 [cron-job.org](https://cron-job.org) 配置：
 
 1. 打开 [GitHub Tokens](https://github.com/settings/tokens) → **Generate new token (classic)**。
    - Expiration：90 天或更久
@@ -166,19 +166,19 @@ GitHub Actions 自带的 `schedule` 对新仓库、不活跃仓库经常不触�
 
 常见错误：401 多半是 Authorization 少了 `token ` 前缀；422 多半是 Body 没带 `{"ref": "main"}`；403 多半是 Token 没勾 workflow 权限。
 
-仓库自带的 schedule 可以保留作备份；真正可靠的是这一步外部触发。
+需要临时恢复仓库自带定时时，取消 `.github/workflows/renew.yml` 里 `schedule` 的注释即可。
 
 ***
 
 ## 运行计划
 
-- **执行频率**：每月 1 日北京时间 08:23。请用 cron-job.org 触发；GitHub 自带 schedule 仅作备份，对新仓库不可靠。
+- **执行频率**：每月 1 日北京时间 08:23，由 cron-job.org 触发。仓库自带 schedule 已关闭。
 
 - **速率限制**：官方文档对默认额度有两处不同表述（30 次/分与 60 次/分），脚本按 2 秒间隔保守节流，两种口径下都安全。如需调整请改 `DNSHE_MIN_INTERVAL`。
 
 - **错误处理**：续期失败时，推送消息会带上官方 `error_code` 与可读原因（如认证失败、额度不足、尚未进入续期窗口还需等待多少天）。
 
-- **长期不动的仓库会被自动停用**：GitHub 会在公开仓库 60 天无活动后自动禁用定时工作流。cron-job.org 外部触发不受此限制；若只靠 GitHub schedule，建议每两个月手动 Run 一次。
+- **仓库不活跃不影响外部触发**：cron-job.org 调用 `workflow_dispatch` 不受 GitHub 对闲置仓库禁用 schedule 的限制。工作流本身仍需保持 Enable。
 
 - **报告内容**：推送分两段——第一段是本次续期结果，第二段列出全部域名的到期时间。域名较多时 Telegram 会自动分成多条消息发送。
 
