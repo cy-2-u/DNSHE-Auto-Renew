@@ -1044,6 +1044,11 @@ def build_notifier(config):
 
 
 def build_message(config, quota_text, renewal_results, expiry_lines, has_failure, now=None):
+    """完整报告，用于 Actions 日志。
+
+    明细（每个跳过原因、每个域名的到期时间）都留在这里；推送只发摘要，
+    避免每天/每次运行把几十行重复内容灌进通知。
+    """
     parts = []
 
     # 首行带运行时间，一举两得：
@@ -1077,12 +1082,69 @@ def build_message(config, quota_text, renewal_results, expiry_lines, has_failure
     return "\n".join(parts)
 
 
+def build_summary(config, quota_text, report, now=None):
+    """推送摘要：只保留需要人看的结论，跳过明细留在日志里。
+
+    一条推送的价值在于「有没有东西要处理」，而不在于复述全部域名。
+    因此这里只包含：
+    - 续期成功 / 失败（失败带原因）
+    - 状态异常的域名（suspended / expired，最容易静默出问题）
+    - 跳过项的聚合计数
+    """
+    parts = []
+    if now is not None:
+        parts.append(f"运行时间：{now.astimezone(config.tz).strftime('%Y-%m-%d %H:%M:%S')} "
+                     f"({format_offset(config.tz)})")
+        parts.append("")
+    if quota_text:
+        parts.append(quota_text)
+        parts.append("")
+
+    total = report.total
+    parts.append(f"共 {total} 个域名：续期成功 {len(report.successes)}，失败 {len(report.failures)}，跳过 {report.skip_count}")
+
+    if report.successes:
+        parts.append("")
+        parts.append("✅ 续期成功")
+        parts.extend(f"- {line}" for line in report.successes)
+
+    if report.failures:
+        parts.append("")
+        parts.append("❌ 需要处理")
+        parts.extend(f"- {line}" for line in report.failures)
+
+    if report.abnormal:
+        parts.append("")
+        parts.append("⚠️ 域名状态异常")
+        parts.extend(f"- {line}" for line in report.abnormal)
+
+    skip_notes = []
+    if report.not_in_window:
+        skip_notes.append(f"{report.not_in_window} 个未到 {config.threshold_days} 天窗口")
+    if report.never_expires:
+        skip_notes.append(f"{report.never_expires} 个永不过期")
+    if skip_notes:
+        parts.append("")
+        parts.append(f"⏭️ 跳过：{'，'.join(skip_notes)}")
+
+    if report.failures:
+        parts.append("")
+        parts.append("完整明细见 GitHub Actions 日志")
+    return "\n".join(parts)
+
+
 @dataclass
 class RenewOutcome:
-    """一次续期尝试的结果。new_expiry 非空时可用于刷新到期时间清单。"""
+    """一次续期尝试的结果。
+
+    line 用于 Actions 日志；brief 用于推送摘要，刻意更短。
+    new_expiry 非空时可用于刷新到期时间清单。
+    """
     line: str
     failed: bool
     new_expiry: Optional[str] = None
+    brief: str = ""
+    not_in_window: bool = False
 
 
 def renew_one(client, view):
@@ -1092,9 +1154,11 @@ def renew_one(client, view):
     except ApiError as e:
         # 只兜接口层错误；编程错误（AttributeError/TypeError 等）应当抛出，
         # 否则会被伪装成「请求异常」，掩盖真正的 bug。
-        return RenewOutcome(f"❌ {view.label}: 请求异常 ({e})", True)
+        return RenewOutcome(f"❌ {view.label}: 请求异常 ({e})", True,
+                            brief=f"{view.label}：请求异常 ({e})")
     except requests.RequestException as e:
-        return RenewOutcome(f"❌ {view.label}: 网络异常 ({e})", True)
+        return RenewOutcome(f"❌ {view.label}: 网络异常 ({e})", True,
+                            brief=f"{view.label}：网络异常 ({e})")
 
     if payload.get('success'):
         new_expiry = payload.get('new_expires_at') or ''
@@ -1102,17 +1166,36 @@ def renew_one(client, view):
         remaining = payload.get('remaining_days')
         tail = f"，剩余 {remaining}天" if remaining is not None else ""
         shown = new_expiry or '未知'
+        brief_tail = f"，剩余 {remaining}天" if remaining is not None else ""
         return RenewOutcome(
             f"✅ {view.label}: 续期成功 (新到期 {shown}{tail}, {charge})",
             False,
             new_expiry or None,
+            brief=f"{view.label} → 新到期 {shown}{brief_tail}（{charge}）",
         )
 
     detail = describe_error(payload)
     if payload.get('error_code') in BENIGN_ERROR_CODES:
         # 尚未进入续期窗口，属预期结果，不计入失败
-        return RenewOutcome(f"⏭️ {view.label}: 暂不可续期 ({detail})", False)
-    return RenewOutcome(f"❌ {view.label}: 续期失败 ({detail})", True)
+        return RenewOutcome(f"⏭️ {view.label}: 暂不可续期 ({detail})", False,
+                            brief=f"{view.label}：{detail}", not_in_window=True)
+    return RenewOutcome(f"❌ {view.label}: 续期失败 ({detail})", True,
+                        brief=f"{view.label}：{detail}")
+
+
+@dataclass
+class RenewReport:
+    """本轮的结构化结果，用于生成精简推送摘要。"""
+    total: int = 0
+    successes: List[str] = field(default_factory=list)
+    failures: List[str] = field(default_factory=list)
+    abnormal: List[str] = field(default_factory=list)
+    not_in_window: int = 0
+    never_expires: int = 0
+
+    @property
+    def skip_count(self):
+        return self.not_in_window + self.never_expires
 
 
 def run(config, client, notifier, now=None):
@@ -1135,27 +1218,41 @@ def run(config, client, notifier, now=None):
 
     renewal_results: List[str] = []
     expiry_lines: List[str] = []
+    report = RenewReport(total=len(subdomains))
     has_failure = False
 
     for index, raw in enumerate(subdomains):
         view = inspect_domain(raw, index, now, config.tz)
         expiry_lines.append(expiry_line(view, now))
         action = decide(view, config.threshold_days, now)
+        # 状态异常与是否续期无关：被暂停/过期的域名即使远离续期窗口也要提醒
+        if view.status_abnormal:
+            report.abnormal.append(f"{view.label}：状态 {view.status_abnormal}")
 
         if action == 'invalid':
             has_failure = True
-            renewal_results.append(f"❌ {view.label}: {view.problem}")
+            line = f"❌ {view.label}: {view.problem}"
+            renewal_results.append(line)
+            report.failures.append(f"{view.label}：{view.problem}")
         elif action == 'never':
             renewal_results.append(mark(view, f"⏭️ {view.label}: 已设置为永不过期，跳过续期"))
+            report.never_expires += 1
         elif action == 'skip':
             renewal_results.append(mark(view, (
                 f"⏭️ {view.label}: {describe_remaining(view, now)} "
                 f"> {config.threshold_days}天，尚未进入续期窗口，跳过"
             )))
+            report.not_in_window += 1
         else:
             outcome = renew_one(client, view)
             renewal_results.append(mark(view, outcome.line))
             has_failure = has_failure or outcome.failed
+            if outcome.failed:
+                report.failures.append(outcome.brief or view.label)
+            elif outcome.not_in_window:
+                report.not_in_window += 1
+            else:
+                report.successes.append(outcome.brief or view.label)
             if outcome.new_expiry:
                 # 续期成功后刷新到期清单，避免第二段显示续期前的旧时间
                 view.expires_raw = outcome.new_expiry
@@ -1174,7 +1271,7 @@ def run(config, client, notifier, now=None):
         return 0
 
     # 推送失败同样算失败：报告发不出去等于没有告警通道
-    pushed = notifier.send(message, title=title)
+    pushed = notifier.send(build_summary(config, quota_text, report, now), title=title)
     return 0 if (not has_failure and pushed) else 1
 
 
