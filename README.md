@@ -1,20 +1,28 @@
 # DNSHE 域名自动续期助手
 
-本项目是一个基于 GitHub Actions 的自动化脚本，旨在利用 **DNSHE 免费域名 API**  实现子域名的自动续期，并通过 **PushPlus / Telegram Bot** 推送执行结果，确保您的免费域名永不过期。
+本项目是一个基于 GitHub Actions 的自动化脚本，旨在利用 **DNSHE 免费域名 API** 实现子域名的自动续期，并通过 **MeoW / PushPlus / Telegram Bot** 推送执行结果，确保您的免费域名永不过期。
 
-## 🌟 功能特性
+## 功能特性
 
-- **全自动续期**：每月 1 日自动执行续期操作 。
+- **全自动续期**：每月 1 日自动执行续期操作。
 
-- **多域名支持**：自动遍历账户下所有子域名进行批量续期 。
+- **多域名支持**：自动遍历账户下所有子域名进行批量续期。
 
-- **即时通知**：通过 PushPlus / Telegram Bot 推送详细报告，结果逐行显示，清晰直观。
+- **即时通知**：默认推荐 MeoW，也可并用 PushPlus / Telegram Bot；结果逐行显示。
 
-- **安全合规**：采用 GitHub Secrets 管理密钥，不在代码中硬编码敏感信息 。
+- **外部触发**：支持 cron-job.org 调用 `workflow_dispatch`，不依赖 GitHub 自带定时是否生效。
+
+- **安全合规**：采用 GitHub Secrets 管理密钥，不在代码中硬编码敏感信息。
 
 ***
 
-## 📝 更新说明
+## 更新说明
+
+（2026-10-22）
+
+- **MeoW 推送**：新增 MeoW 作为推荐通知通道，配置 `MEOW_NICKNAME` 即可；PushPlus / Telegram 仍可并存。
+- **推送级别**：`PUSH_LEVEL=fail_only` 时仅在有失败项时推送，默认 `all`。
+- **外部触发**：工作流保留 `workflow_dispatch`，可用 cron-job.org 每月调用一次，避免新仓库 schedule 不触发。
 
 （2026-10-21）
 
@@ -64,22 +72,29 @@
 
 
 
-### 第二步：获取推送 Token
+### 第二步：配置通知（任选，可并存）
+
+推荐使用 **MeoW**，配置最简单。PushPlus / Telegram 作为可选备份。
+
+#### MeoW（推荐）
+
+1. 访问 [MeoW API 文档](https://www.chuckfang.com/MeoW/api_doc.html)，按文档注册并获取**用户昵称**。
+2. 将昵称填入 Secrets 的 `MEOW_NICKNAME`。
+
+#### PushPlus（可选）
 
 1. 访问 [PushPlus 官网](https://www.pushplus.plus/)。
 2. 登录并获取您的 **Token**。
-3. （可选）若需推送到群组，请创建一个群组并记录 **群组编码 (Topic)**。
+3. 若需推送到群组，请创建一个群组并记录 **群组编码 (Topic)**。
 
-### （可选）：配置 Telegram Bot 通知
-
-若希望同时通过 Telegram 接收报告：
+#### Telegram Bot（可选）
 
 1. 在 Telegram 中找到 [@BotFather](https://t.me/BotFather)，发送 `/newbot` 创建机器人，保存获得的 **Bot Token**。
 2. 向您的机器人发送任意一条消息（必须先发起过对话，机器人才能向您推送）。
 3. 获取 **Chat ID**：浏览器访问 `https://api.telegram.org/bot<你的Token>/getUpdates`，在返回的 JSON 中找到 `chat.id`；也可使用 [@userinfobot](https://t.me/userinfobot) 查询。
 4. 将两个值分别填入 Secrets 的 `TELEGRAM_BOT_TOKEN` 与 `TELEGRAM_CHAT_ID`。
 
-> 通知方式可任选或并存：只配 PushPlus、只配 Telegram、或两者都配均可；都未配置时脚本仅跳过推送，不影响续期执行。
+> 通道可任选或并存。都未配置时脚本仅跳过推送，不影响续期执行。只要有一个通道送达即视为成功。
 
 ### 第三步：配置 GitHub 仓库
 
@@ -91,7 +106,8 @@
 | -------------------- | ----------------------- | ------------------- |
 | `DNSHE_API_KEY`      | DNSHE 的 API Key         | `cfsd_xxxxxxxxxx`   |
 | `DNSHE_API_SECRET`   | DNSHE 的 API Secret      | `yyyyyyyyyyyy`      |
-| `PUSHPLUS_TOKEN`     | PushPlus 的用户令牌          | `9a8b...`           |
+| `MEOW_NICKNAME`      | (推荐) MeoW 推送昵称         | `your_nickname`     |
+| `PUSHPLUS_TOKEN`     | (可选) PushPlus 的用户令牌     | `9a8b...`           |
 | `PUSHPLUS_TOPIC`     | (可选) PushPlus 群组编码      | `123`               |
 | `TELEGRAM_BOT_TOKEN` | (可选) Telegram Bot Token | `123456:ABC-DEF...` |
 | `TELEGRAM_CHAT_ID`   | (可选) Telegram 目标聊天 ID   | `123456789`         |
@@ -104,6 +120,7 @@
 
 | 变量名称                         | 默认值                                               | 说明                                     |
 | ---------------------------- | ------------------------------------------------- | -------------------------------------- |
+| `PUSH_LEVEL`                 | `all`                                             | `all` 每次推送；`fail_only` 仅有失败项时推送        |
 | `DNSHE_RENEW_THRESHOLD_DAYS` | `180`                                             | 剩余天数不超过该值时才续期（官方窗口为到期前 180 天）          |
 | `DNSHE_MIN_INTERVAL`         | `2`                                               | 相邻两次 API 调用的最小间隔（秒）                    |
 | `DNSHE_TZ_OFFSET`            | `8`                                               | 解析到期时间用的时区偏移。**非中国时区用户务必修改**，否则剩余天数会算错 |
@@ -119,17 +136,49 @@
 3. 在左侧选择 **"DNSHE Domain Auto Renew"** 工作流，点击 **Enable workflow**（若已启用则跳过）。
 4. 点击 **Run workflow** 手动触发一次，验证配置是否正确。
 
+### 第五步（推荐）：用 cron-job.org 外部触发
+
+GitHub Actions 自带的 `schedule` 对新仓库、不活跃仓库经常不触发：手动 Run 正常，到点却没有运行记录。续期每月只跑一次，漏跑就是漏续期。
+
+推荐用免费的 [cron-job.org](https://cron-job.org) 每月调用一次 `workflow_dispatch`：
+
+1. 打开 [GitHub Tokens](https://github.com/settings/tokens) → **Generate new token (classic)**。
+   - Expiration：90 天或更久
+   - 勾选 **workflow**（在 repo 下方）
+   - 生成后立刻复制，格式类似 `ghp_...`，只显示一次
+2. 注册 [cron-job.org](https://cron-job.org)，创建 Cronjob：
+   - **Title**：`DNSHE 域名续期`
+   - **URL**：`https://api.github.com/repos/你的用户名/DNSHE-Auto-Renew/actions/workflows/renew.yml/dispatches`
+   - **Request method**：POST
+   - **Time zone**：Asia/Shanghai
+   - **执行时间**：每月 1 日 08:23
+   - Headers：
+
+     | Key | Value |
+     | --- | --- |
+     | `Accept` | `application/vnd.github.v3+json` |
+     | `Authorization` | `token 你的GitHub_Token` |
+     | `Content-Type` | `application/json` |
+
+     `Authorization` 必须是 `token` + 空格 + Token，例如 `token ghp_xxx`。
+   - Body（Raw）：`{"ref": "main"}`
+3. Save。可先点一次 Execute 验证，GitHub Actions 里应立刻出现一次运行。
+
+常见错误：401 多半是 Authorization 少了 `token ` 前缀；422 多半是 Body 没带 `{"ref": "main"}`；403 多半是 Token 没勾 workflow 权限。
+
+仓库自带的 schedule 可以保留作备份；真正可靠的是这一步外部触发。
+
 ***
 
-## 📅 运行计划
+## 运行计划
 
-- **执行频率**：每月 1 日北京时间 08:23。刻意避开整点——GitHub 官方文档说明 `schedule` 在高负载时会延迟甚至丢弃任务，而「每个整点」正是高负载时段。
+- **执行频率**：每月 1 日北京时间 08:23。请用 cron-job.org 触发；GitHub 自带 schedule 仅作备份，对新仓库不可靠。
 
 - **速率限制**：官方文档对默认额度有两处不同表述（30 次/分与 60 次/分），脚本按 2 秒间隔保守节流，两种口径下都安全。如需调整请改 `DNSHE_MIN_INTERVAL`。
 
 - **错误处理**：续期失败时，推送消息会带上官方 `error_code` 与可读原因（如认证失败、额度不足、尚未进入续期窗口还需等待多少天）。
 
-- **⚠️ 长期不动的仓库会被自动停用**：GitHub 会在公开仓库 60 天无活动后自动禁用定时工作流。建议每两个月手动 Run 一次，或给仓库点个 star / 提交一次改动来保活。
+- **长期不动的仓库会被自动停用**：GitHub 会在公开仓库 60 天无活动后自动禁用定时工作流。cron-job.org 外部触发不受此限制；若只靠 GitHub schedule，建议每两个月手动 Run 一次。
 
 - **报告内容**：推送分两段——第一段是本次续期结果，第二段列出全部域名的到期时间。域名较多时 Telegram 会自动分成多条消息发送。
 
@@ -154,8 +203,10 @@ pip install -r requirements.txt
 
 export DNSHE_API_KEY=...
 export DNSHE_API_SECRET=...
+export MEOW_NICKNAME=...                             # 推荐
 export PUSHPLUS_TOKEN=...                            # 可选
 export TELEGRAM_BOT_TOKEN=... TELEGRAM_CHAT_ID=...   # 可选
+export PUSH_LEVEL=all                                # 可选：all / fail_only
 
 python renew_domains.py
 ```

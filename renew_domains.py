@@ -13,6 +13,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
+from urllib.parse import quote
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -33,8 +34,14 @@ PUSHPLUS_CODE_HINTS = {
 }
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
-
 TELEGRAM_MESSAGE_LIMIT = 4096
+
+MEOW_API_BASE = "https://api.chuckfang.com"
+
+DEFAULT_NOTIFY_TITLE = "DNSHE 域名自动续期报告"
+FAIL_NOTIFY_TITLE = "DNSHE 域名续期失败"
+PUSH_LEVEL_ALL = "all"
+PUSH_LEVEL_FAIL_ONLY = "fail_only"
 
 REQUEST_TIMEOUT = (10, 30)
 
@@ -170,14 +177,26 @@ def format_offset(tz):
     return f"UTC{sign}{hours}" + (f":{minutes:02d}" if minutes else "")
 
 
+def parse_push_level(raw, default=PUSH_LEVEL_ALL):
+    text = (raw or '').strip().lower()
+    if not text:
+        return default
+    if text in (PUSH_LEVEL_ALL, PUSH_LEVEL_FAIL_ONLY):
+        return text
+    warn(f"PUSH_LEVEL={raw!r} 无效，可选 all / fail_only，回退到 {default}")
+    return default
+
+
 @dataclass(frozen=True)
 class Config:
     api_key: str = ""
     api_secret: str = ""
+    meow_nickname: str = ""
     pushplus_token: str = ""
     pushplus_topic: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    push_level: str = PUSH_LEVEL_ALL
     base_url: str = DEFAULT_BASE_URL
     threshold_days: int = DEFAULT_THRESHOLD_DAYS
     min_interval: float = DEFAULT_MIN_INTERVAL
@@ -193,10 +212,12 @@ class Config:
         return cls(
             api_key=text('DNSHE_API_KEY'),
             api_secret=text('DNSHE_API_SECRET'),
+            meow_nickname=text('MEOW_NICKNAME'),
             pushplus_token=text('PUSHPLUS_TOKEN'),
             pushplus_topic=text('PUSHPLUS_TOPIC'),
             telegram_bot_token=text('TELEGRAM_BOT_TOKEN'),
             telegram_chat_id=text('TELEGRAM_CHAT_ID'),
+            push_level=parse_push_level(env.get('PUSH_LEVEL')),
             base_url=text('DNSHE_API_BASE_URL') or DEFAULT_BASE_URL,
             threshold_days=env_number(env, 'DNSHE_RENEW_THRESHOLD_DAYS',
                                       DEFAULT_THRESHOLD_DAYS, int),
@@ -738,13 +759,65 @@ def quota_line(quota):
     return f"账户积分：{summary}"
 
 
+class MeowNotifier:
+    """通过 MeoW webhook 推送纯文本。
+
+    官方文档：https://www.chuckfang.com/MeoW/api_doc.html
+    POST JSON 比 GET 路径参数更稳妥：报告含换行、域名、错误原文时，
+    不必把整段内容塞进 URL。
+    """
+
+    def __init__(self, nickname, session=None):
+        self.nickname = nickname
+        self.session = session or build_session(notify_retry())
+
+    def send(self, content, title=DEFAULT_NOTIFY_TITLE):
+        """返回是否成功。本方法绝不抛异常，否则会吞掉它要上报的错误。"""
+        if not self.nickname:
+            print("未配置 MeoW 昵称，跳过推送")
+            return True
+
+        url = f"{MEOW_API_BASE}/{quote(self.nickname, safe='')}"
+        try:
+            resp = self.session.post(
+                url,
+                params={"msgType": "text"},
+                json={"title": _meow_safe_title(title), "msg": content},
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            try:
+                result = resp.json()
+            except ValueError:
+                warn(f"MeoW 返回非 JSON 内容: {(resp.text or '')[:200]}")
+                return False
+            if not isinstance(result, dict):
+                warn(f"MeoW 响应格式异常: {str(result)[:200]}")
+                return False
+            if result.get('status') == 200:
+                print("MeoW 推送成功")
+                return True
+            warn(f"MeoW 推送未成功 (status={result.get('status')}): "
+                 f"{result.get('message') or result.get('msg') or result}")
+            return False
+        except Exception as e:
+            warn(f"MeoW 推送失败: {e}")
+            return False
+
+
+def _meow_safe_title(title):
+    """MeoW 标题不宜含冒号、斜杠等特殊字符。"""
+    text = (title or DEFAULT_NOTIFY_TITLE).replace("：", "-").replace(":", "-").replace("/", "-")
+    return text or DEFAULT_NOTIFY_TITLE
+
+
 class PushPlusNotifier:
     def __init__(self, token, topic='', session=None):
         self.token = token
         self.topic = topic
         self.session = session or build_session(notify_retry())
 
-    def send(self, content):
+    def send(self, content, title=DEFAULT_NOTIFY_TITLE):
         """返回是否成功。本方法绝不抛异常，否则会吞掉它要上报的错误。"""
         if not self.token:
             print("未配置 PushPlus Token，跳过推送")
@@ -752,7 +825,7 @@ class PushPlusNotifier:
 
         data = {
             "token": self.token,
-            "title": "DNSHE 域名自动续期报告",
+            "title": title or DEFAULT_NOTIFY_TITLE,
             "content": content,
             "template": "txt",
             "topic": self.topic,
@@ -875,15 +948,17 @@ class TelegramNotifier:
         self.chat_id = chat_id
         self.session = session or build_session(notify_retry())
 
-    def send(self, content):
+    def send(self, content, title=DEFAULT_NOTIFY_TITLE):
         """返回是否全部发送成功。本方法绝不抛异常，否则会吞掉它要上报的错误。"""
         if not self.bot_token or not self.chat_id:
             print("未配置 Telegram Bot Token 或 Chat ID，跳过推送")
             return True
 
+        body = content if not title else f"{title}\n\n{content}"
+
         url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/sendMessage"
         ok = True
-        for index, chunk in enumerate(split_message(content), start=1):
+        for index, chunk in enumerate(split_message(body), start=1):
             data = {"chat_id": self.chat_id, "text": chunk}
             try:
                 resp = self.session.post(url, json=data, timeout=REQUEST_TIMEOUT)
@@ -938,14 +1013,14 @@ class CompositeNotifier:
     def __init__(self, channels):
         self.channels = channels
 
-    def send(self, content):
+    def send(self, content, title=DEFAULT_NOTIFY_TITLE):
         if not self.channels:
             print("未配置任何通知通道，跳过推送")
             return True
         # 不能用 all(...)：all() 遇到第一个 False 就短路，后面的通道根本不会
-        # 被调用。PushPlus 挂掉时 Telegram 也就收不到——恰恰是最需要备份通道
+        # 被调用。某个通道挂掉时其余通道也就收不到——恰恰是最需要备份通道
         # 的时刻。这里必须全部执行完再汇总。
-        results = [channel.send(content) for channel in self.channels]
+        results = [channel.send(content, title=title) for channel in self.channels]
         delivered = any(results)
         if not delivered:
             warn(f"所有 {len(results)} 个通知通道均推送失败")
@@ -957,6 +1032,8 @@ class CompositeNotifier:
 def build_notifier(config):
     """按 Config 装配所有已配置的通知通道，供主流程与异常兜底共用。"""
     channels = []
+    if config.meow_nickname:
+        channels.append(MeowNotifier(config.meow_nickname))
     if config.pushplus_token:
         channels.append(PushPlusNotifier(config.pushplus_token, config.pushplus_topic))
     if config.telegram_bot_token and config.telegram_chat_id:
@@ -1047,7 +1124,7 @@ def run(config, client, notifier, now=None):
     except Exception as e:
         message = f"❌ 获取域名列表失败，本次未执行任何续期: {e}"
         print(message, file=sys.stderr)
-        notifier.send(message)
+        notifier.send(message, title=FAIL_NOTIFY_TITLE)
         return 1
 
     # 积分只是辅助信息，查不到不该让整轮续期失败
@@ -1090,8 +1167,14 @@ def run(config, client, notifier, now=None):
 
     message = build_message(config, quota_text, renewal_results, expiry_lines, has_failure, now)
     print(message)
+
+    title = FAIL_NOTIFY_TITLE if has_failure else DEFAULT_NOTIFY_TITLE
+    if config.push_level == PUSH_LEVEL_FAIL_ONLY and not has_failure:
+        print("PUSH_LEVEL=fail_only 且本次全部正常，跳过推送")
+        return 0
+
     # 推送失败同样算失败：报告发不出去等于没有告警通道
-    pushed = notifier.send(message)
+    pushed = notifier.send(message, title=title)
     return 0 if (not has_failure and pushed) else 1
 
 
@@ -1107,7 +1190,7 @@ def main():
             "请在仓库 Settings -> Secrets and variables -> Actions 中配置后重试。"
         )
         print(message, file=sys.stderr)
-        notifier.send(message)
+        notifier.send(message, title=FAIL_NOTIFY_TITLE)
         return 1
 
     return run(config, DnsheClient(config), notifier)
@@ -1124,7 +1207,8 @@ if __name__ == "__main__":
         print(detail, file=sys.stderr)
         try:
             build_notifier(Config.from_env()).send(
-                f"⚠️ 续期脚本异常中断，本次续期未完成\n\n{detail[-1500:]}")
+                f"⚠️ 续期脚本异常中断，本次续期未完成\n\n{detail[-1500:]}",
+                title=FAIL_NOTIFY_TITLE)
         except Exception:
             pass
         sys.exit(1)

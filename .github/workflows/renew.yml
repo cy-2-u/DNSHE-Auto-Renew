@@ -2,16 +2,13 @@ name: DNSHE Domain Auto Renew
 
 on:
   schedule:
-    # 表达式说明：分钟 小时 天 月 星期（均为 UTC）
     # 23 0 1 * * = 每月 1 日 UTC 00:23，即北京时间 08:23
-    #
-    # 为什么是 :23 而不是整点：
-    # GitHub 官方文档说明 schedule 在高负载时会延迟甚至丢弃任务，而
-    # 「每个整点开始」正是高负载时段，所以刻意错开到 :23。
+    # 刻意错开整点，降低 GitHub schedule 在高峰被延迟或丢弃的概率。
+    # 新仓库 / 不活跃仓库的 schedule 可能根本不触发，请同时用
+    # cron-job.org 调 workflow_dispatch（见 README）。
     - cron: '23 0 1 * *'
-  workflow_dispatch: # 保留手动触发按钮，方便测试
+  workflow_dispatch:
 
-# 同一时间只跑一个，避免手动触发与定时任务撞车导致重复续期
 concurrency:
   group: dnshe-renew
   cancel-in-progress: false
@@ -20,6 +17,19 @@ jobs:
   renew:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      DNSHE_API_KEY: ${{ secrets.DNSHE_API_KEY }}
+      DNSHE_API_SECRET: ${{ secrets.DNSHE_API_SECRET }}
+      MEOW_NICKNAME: ${{ secrets.MEOW_NICKNAME }}
+      PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+      PUSHPLUS_TOPIC: ${{ secrets.PUSHPLUS_TOPIC }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      PUSH_LEVEL: ${{ vars.PUSH_LEVEL }}
+      DNSHE_RENEW_THRESHOLD_DAYS: ${{ vars.DNSHE_RENEW_THRESHOLD_DAYS }}
+      DNSHE_MIN_INTERVAL: ${{ vars.DNSHE_MIN_INTERVAL }}
+      DNSHE_TZ_OFFSET: ${{ vars.DNSHE_TZ_OFFSET }}
+      DNSHE_API_BASE_URL: ${{ vars.DNSHE_API_BASE_URL }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -28,23 +38,11 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+          cache: 'pip'
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
       - name: Run renew script
-        env:
-          # 以下变量需在仓库 Settings -> Secrets and variables -> Actions 中配置
-          # Secrets（敏感，不可回显）
-          DNSHE_API_KEY: ${{ secrets.DNSHE_API_KEY }}
-          DNSHE_API_SECRET: ${{ secrets.DNSHE_API_SECRET }}
-          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          PUSHPLUS_TOPIC: ${{ secrets.PUSHPLUS_TOPIC }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Variables（可选，非敏感配置；不配则用脚本默认值）
-          DNSHE_RENEW_THRESHOLD_DAYS: ${{ vars.DNSHE_RENEW_THRESHOLD_DAYS }}
-          DNSHE_MIN_INTERVAL: ${{ vars.DNSHE_MIN_INTERVAL }}
-          DNSHE_TZ_OFFSET: ${{ vars.DNSHE_TZ_OFFSET }}
-          DNSHE_API_BASE_URL: ${{ vars.DNSHE_API_BASE_URL }}
         run: python renew_domains.py
+        timeout-minutes: 10
